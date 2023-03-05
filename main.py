@@ -1,9 +1,14 @@
+import time
+
 import PIL.ImagePalette
 import serial
 import imageio
 import numpy as np
 
-SQUARE_LEN = 16
+SQUARE_WIDTH = 128
+SQUARE_HEIGHT = 128
+# BUF_SIZE = 1024
+
 
 # https://stackoverflow.com/questions/16856788/slice-2d-array-into-smaller-2d-arrays
 def blockshaped(arr, nrows, ncols):
@@ -22,50 +27,52 @@ def blockshaped(arr, nrows, ncols):
             .reshape(-1, nrows, ncols))
 
 
-def image_to_squares(r, g, b):
+def image_to_rgb565_bytes(r, g, b):
     r = (r.astype(np.uint16) & 0xF8) << 8
     g = (g.astype(np.uint16) & 0xFC) << 3
     b = (b.astype(np.uint16) & 0xF8) >> 3
     rgb565 = r | g | b
-    img_rows = blockshaped(rgb565, SQUARE_LEN, SQUARE_LEN)
-    squares = []
-    for square in img_rows:
-        sp = []
-        flattened = square.flatten()
-        num_arrs = (flattened.shape[0]*2) // 256
-        for arr in np.split(flattened, num_arrs):
-            sp.append(arr.tobytes())
-        squares.append(sp)
-
-    return squares
+    rgb565 = ((rgb565 & 0xFF00) >> 8) | ((rgb565 & 0x00FF) << 8)
+    flattened = rgb565.flatten().tobytes()
+    # num_arrs = (flattened.shape[0] * 2) // BUF_SIZE
+    # for arr in np.split(flattened, num_arrs):
+    #     byte_arrays.append(arr.tobytes())
+    return flattened
 
 
-def stream_to_device(dev: str, image: str, baud=115200):
-    img = imageio.imopen(image, "r")
-    img_data = img.read()
-    img_meta = img.metadata()
+def get_images(images_in: list[str]):
+    images = []
+    for image in images_in:
+        img = imageio.imopen(image, "r")
+        img_data = img.read()
+        img_meta = img.metadata()
 
-    if 'palette' in img_meta:
-        palette = img_meta['palette']
-        palette_inv = {}
-        for color, index in palette.colors.items():
-            palette_inv[index] = color
-        to_rgb = np.vectorize(lambda x: palette_inv[x])
-        r, g, b = to_rgb(image)
-    else:
-        r, g, b = np.split(img_data, 3, axis=2)
-        r = np.squeeze(r, axis=2)
-        g = np.squeeze(g, axis=2)
-        b = np.squeeze(b, axis=2)
+        if 'palette' in img_meta:
+            palette = img_meta['palette']
+            palette_inv = {}
+            for color, index in palette.colors.items():
+                palette_inv[index] = color
+            to_rgb = np.vectorize(lambda x: palette_inv[x])
+            r, g, b = to_rgb(image)
+        else:
+            r, g, b = np.split(img_data, 3, axis=2)
+            r = np.squeeze(r, axis=2)
+            g = np.squeeze(g, axis=2)
+            b = np.squeeze(b, axis=2)
+        images.append(image_to_rgb565_bytes(r, g, b))
+    return images
 
-    squares = image_to_squares(r, g, b)
+
+def stream_to_device(dev: str, images: list[str], positions: list[(int, int)], baud=115200):
+    squares = get_images(images)
     ser = serial.Serial(baudrate=baud)
     ser.port = dev
     ser.baudrate = baud
     ser.open()
     active = True
+    last_cmd = time.time()
     while active:
-        print("DEVICE: ", end='')
+        print("\nDEVICE:\n", end='')
         raw_val = ser.read()
         while raw_val != b'\xFF':
             if raw_val.isascii():
@@ -73,32 +80,47 @@ def stream_to_device(dev: str, image: str, baud=115200):
             else:
                 print("0x" + raw_val.hex(), end=' ')
             raw_val = ser.read()
-        # ser.read_until(expected=b'\xFF')
         cmd = ser.read()
+        print("\nHOST:")
         if cmd == b'\x01':
-            print(f"\nHOST: return num squares: {len(squares)}")
-            # write_verified(ser, len(squares).to_bytes(2, byteorder="little", signed=False))
+            print(f"return num squares: {len(squares)}")
             ser.write(len(squares).to_bytes(2, byteorder="little", signed=False))
         elif cmd == b'\x02':
             img_num = int.from_bytes(ser.read(2), byteorder="little", signed=False)
-            print(f"HOST: return data from square: {img_num}")
+            print(f"return data from square: {img_num}")
+            print(time.time() - last_cmd)
+            start = time.time()
             data = squares[img_num]
-            square_y = (img_num // (128 // SQUARE_LEN)) * SQUARE_LEN
-            square_x = (img_num % (128 // SQUARE_LEN)) * SQUARE_LEN
-            ser.write(square_x.to_bytes(1, byteorder="little", signed=False))
+            start_x = positions[img_num][0]
+            start_y = positions[img_num][1]
+            end_x = positions[img_num][2]
+            end_y = positions[img_num][3]
+            # square_y = (img_num // (128 // SQUARE_WIDTH)) * SQUARE_HEIGHT
+            # square_x = (img_num % (128 // SQUARE_WIDTH)) * SQUARE_WIDTH
+            ser.write(start_x.to_bytes(1, byteorder="little", signed=False))
+            ser.write(start_y.to_bytes(1, byteorder="little", signed=False))
+            ser.write(end_x.to_bytes(1, byteorder="little", signed=False))
+            ser.write(end_y.to_bytes(1, byteorder="little", signed=False))
+            ser.write(len(data).to_bytes(2, byteorder="little", signed=False))
             ser.read_until(b'\xAA')
-            ser.write(square_y.to_bytes(1, byteorder="little", signed=False))
             ser.read_until(b'\xAA')
-            for packet in data:
-                ser.write(packet)
-                # for j in range(256):
-
-            print("HOST: Square transfer complete")
+            # for packet in data:
+            ser.write(data)
+            print(f"Square transfer complete, took: {time.time() - start} seconds")
+            last_cmd = time.time()
         elif cmd == b'\x03':
             active = False
 
     print("done")
 
 
+def example():
+    # images = ["./log4j.png", "mc.png", "./rusty.png", "./mcmap.png"]
+    images = ["./q1.png", "./q2.png", "./q3.png", "./q4.png"]
+    # positions = [(0, 0, 127, 127), (0, 0, 127, 127), (0, 0, 127, 127), (0, 0, 127, 127)]
+    positions = [(0,0,31,31), (32,0,63,31), (0,32,31,63), (32,32,63,63)]
+    stream_to_device("COM5", images, positions)
+
+
 if __name__ == '__main__':
-    stream_to_device("COM5", "./mc.png")
+    example()

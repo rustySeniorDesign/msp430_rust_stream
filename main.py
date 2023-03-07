@@ -1,14 +1,14 @@
 import time
 
-import PIL.ImagePalette
 import serial
 import imageio
 import numpy as np
+from mss import mss
+from PIL import Image
 
-SQUARE_WIDTH = 128
-SQUARE_HEIGHT = 128
-# BUF_SIZE = 1024
-
+STREAM_SIZE = 128
+bounding_box = {'top': 200, 'left': 200, 'width': 512, 'height': 512}
+sct = mss()
 
 # https://stackoverflow.com/questions/16856788/slice-2d-array-into-smaller-2d-arrays
 def blockshaped(arr, nrows, ncols):
@@ -40,6 +40,14 @@ def image_to_rgb565_bytes(r, g, b):
     return flattened
 
 
+def grab_latest_image():
+    sct_img = sct.grab(bounding_box)
+    img = Image.frombytes('RGB', (sct_img.width, sct_img.height), sct_img.rgb)
+    img.thumbnail((STREAM_SIZE, STREAM_SIZE))
+    r, g, b = np.split(np.array(img), 3, axis=2)
+    return image_to_rgb565_bytes(r, g, b), img.width, img.height
+
+
 def get_images(images_in: list[str]):
     images = []
     for image in images_in:
@@ -63,7 +71,22 @@ def get_images(images_in: list[str]):
     return images
 
 
-def stream_to_device(dev: str, images: list[str], positions: list[(int, int)], baud=115200):
+def send_image(ser, data, position):
+    start_x = position[0]
+    start_y = position[1]
+    end_x = position[2]
+    end_y = position[3]
+    ser.write(start_x.to_bytes(1, byteorder="little", signed=False))
+    ser.write(start_y.to_bytes(1, byteorder="little", signed=False))
+    ser.write(end_x.to_bytes(1, byteorder="little", signed=False))
+    ser.write(end_y.to_bytes(1, byteorder="little", signed=False))
+    ser.write(len(data).to_bytes(2, byteorder="little", signed=False))
+    ser.read_until(b'\xAA')
+    ser.read_until(b'\xAA')
+    ser.write(data)
+
+
+def stream_to_device(dev: str, images: list[str], positions: list[(int, int)], baud=230400):
     squares = get_images(images)
     ser = serial.Serial(baudrate=baud)
     ser.port = dev
@@ -71,6 +94,7 @@ def stream_to_device(dev: str, images: list[str], positions: list[(int, int)], b
     ser.open()
     active = True
     last_cmd = time.time()
+
     while active:
         print("\nDEVICE:\n", end='')
         raw_val = ser.read()
@@ -90,25 +114,17 @@ def stream_to_device(dev: str, images: list[str], positions: list[(int, int)], b
             print(f"return data from square: {img_num}")
             print(time.time() - last_cmd)
             start = time.time()
-            data = squares[img_num]
-            start_x = positions[img_num][0]
-            start_y = positions[img_num][1]
-            end_x = positions[img_num][2]
-            end_y = positions[img_num][3]
-            # square_y = (img_num // (128 // SQUARE_WIDTH)) * SQUARE_HEIGHT
-            # square_x = (img_num % (128 // SQUARE_WIDTH)) * SQUARE_WIDTH
-            ser.write(start_x.to_bytes(1, byteorder="little", signed=False))
-            ser.write(start_y.to_bytes(1, byteorder="little", signed=False))
-            ser.write(end_x.to_bytes(1, byteorder="little", signed=False))
-            ser.write(end_y.to_bytes(1, byteorder="little", signed=False))
-            ser.write(len(data).to_bytes(2, byteorder="little", signed=False))
-            ser.read_until(b'\xAA')
-            ser.read_until(b'\xAA')
-            # for packet in data:
-            ser.write(data)
+            send_image(ser, squares[img_num], positions[img_num])
             print(f"Square transfer complete, took: {time.time() - start} seconds")
             last_cmd = time.time()
         elif cmd == b'\x03':
+            img, width, height = grab_latest_image()
+            start_x = 64 - width//2
+            start_y = 64 - height//2
+            end_x = start_x + width - 1
+            end_y = start_y + height - 1
+            send_image(ser, img, (start_x, start_y, end_x, end_y))
+        elif cmd == b'\xFE':
             active = False
 
     print("done")
@@ -118,7 +134,7 @@ def example():
     # images = ["./log4j.png", "mc.png", "./rusty.png", "./mcmap.png"]
     images = ["./q1.png", "./q2.png", "./q3.png", "./q4.png"]
     # positions = [(0, 0, 127, 127), (0, 0, 127, 127), (0, 0, 127, 127), (0, 0, 127, 127)]
-    positions = [(0,0,31,31), (32,0,63,31), (0,32,31,63), (32,32,63,63)]
+    positions = [(0, 0, 31, 31), (32, 0, 63, 31), (0, 32, 31, 63), (32, 32, 63, 63)]
     stream_to_device("COM5", images, positions)
 
 

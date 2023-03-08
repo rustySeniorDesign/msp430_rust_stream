@@ -6,9 +6,10 @@ import numpy as np
 from mss import mss
 from PIL import Image
 
-STREAM_SIZE = 128
+STREAM_SIZE = 32
 bounding_box = {'top': 200, 'left': 200, 'width': 512, 'height': 512}
 sct = mss()
+
 
 # https://stackoverflow.com/questions/16856788/slice-2d-array-into-smaller-2d-arrays
 def blockshaped(arr, nrows, ncols):
@@ -86,7 +87,7 @@ def send_image(ser, data, position):
     ser.write(data)
 
 
-def stream_to_device(dev: str, images: list[str], positions: list[(int, int)], baud=230400):
+def stream_to_device(dev: str, images: list[str], positions: list[(int, int)], baud=256000):
     squares = get_images(images)
     ser = serial.Serial(baudrate=baud)
     ser.port = dev
@@ -119,8 +120,8 @@ def stream_to_device(dev: str, images: list[str], positions: list[(int, int)], b
             last_cmd = time.time()
         elif cmd == b'\x03':
             img, width, height = grab_latest_image()
-            start_x = 64 - width//2
-            start_y = 64 - height//2
+            start_x = 64 - width // 2
+            start_y = 64 - height // 2
             end_x = start_x + width - 1
             end_y = start_y + height - 1
             send_image(ser, img, (start_x, start_y, end_x, end_y))
@@ -132,9 +133,9 @@ def stream_to_device(dev: str, images: list[str], positions: list[(int, int)], b
 
 def example():
     # images = ["./log4j.png", "mc.png", "./rusty.png", "./mcmap.png"]
-    images = ["./q1.png", "./q2.png", "./q3.png", "./q4.png"]
-    # positions = [(0, 0, 127, 127), (0, 0, 127, 127), (0, 0, 127, 127), (0, 0, 127, 127)]
-    positions = [(0, 0, 31, 31), (32, 0, 63, 31), (0, 32, 31, 63), (32, 32, 63, 63)]
+    images = ["./rusty.png", "./walmar.jpg"]
+    positions = [(0, 0, 127, 127), (0, 0, 127, 127)]
+    # positions = [(0, 0, 31, 31), (32, 0, 63, 31), (0, 32, 31, 63), (32, 32, 63, 63)]
     stream_to_device("COM5", images, positions)
 
 
